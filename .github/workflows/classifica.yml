@@ -2,7 +2,10 @@ name: Classifica Over 1,5
 
 on:
   schedule:
-    - cron: "0 7 * * *"     # ogni giorno alle 07:00 UTC (08:00 ora solare italiana, 09:00 ora legale)
+    # Due orari (UTC) con minuti "non tondi": GitHub a volte ritarda o salta gli avvii allo scoccare dell'ora.
+    # Il secondo fa da riserva: se la classifica di oggi c'è già, non fa nulla.
+    - cron: "23 6 * * *"    # 07:23 ora solare italiana (08:23 ora legale)
+    - cron: "47 8 * * *"    # 09:47 ora solare italiana (10:47 ora legale)
   workflow_dispatch:         # pulsante "Run workflow" per avviarlo a mano
 
 permissions:
@@ -24,12 +27,18 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PAGINA_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
-        run: python bot_over15.py --web docs
+        run: |
+          OGGI=$(TZ=Europe/Rome date +%Y-%m-%d)
+          if [ "${{ github.event_name }}" = "schedule" ] && [ -f "docs/archivio/over15_$OGGI.html" ]; then
+            echo "La classifica di oggi è già pubblicata: niente da fare."
+            exit 0
+          fi
+          python bot_over15.py --web docs
 
       - name: Pubblica la pagina
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
           git add docs
-          git commit -m "Classifica del $(date +%Y-%m-%d)" || echo "Niente da aggiornare"
+          git commit -m "Classifica del $(TZ=Europe/Rome date +%Y-%m-%d)" || echo "Niente da aggiornare"
           git push
