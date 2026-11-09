@@ -9,7 +9,7 @@ stagione in corso:
   3. P(scenario completo)        – le due insieme: 0-0 al 20' E Over 1,5 a fine partita.
 Le partite sono ordinate per la terza colonna.
 
-Dati: football-data.org (chiave gratuita).
+Dati: football-data.co.uk (gratuiti, nessuna chiave necessaria).
 Uso:   python bot_over15.py            (oggi, apre il report nel browser)
        python bot_over15.py --automatico       (avvio pianificato: report + Telegram, senza finestre)
        python bot_over15.py --configura-telegram (collega il tuo Telegram)
@@ -24,9 +24,36 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 # ======================================================================= CONFIG
-API_KEY = os.environ.get("FOOTBALL_DATA_KEY", "")     # oppure scrivila qui tra le virgolette
-CAMPIONATI = {"SA": "Serie A", "PL": "Premier League", "PD": "La Liga", "BL1": "Bundesliga",
-              "FL1": "Ligue 1", "DED": "Eredivisie", "PPL": "Primeira Liga", "ELC": "Championship"}
+# Fonte dati: football-data.co.uk (gratuita, nessuna chiave). Codici delle divisioni:
+CAMPIONATI = {
+    "I1": "Italia – Serie A",        "I2": "Italia – Serie B",
+    "E0": "Inghilterra – Premier League", "E1": "Inghilterra – Championship",
+    "SP1": "Spagna – La Liga",       "SP2": "Spagna – Segunda División",
+    "D1": "Germania – Bundesliga",   "D2": "Germania – 2. Bundesliga",
+    "F1": "Francia – Ligue 1",       "F2": "Francia – Ligue 2",
+    "SC0": "Scozia – Premiership",   "SC1": "Scozia – Championship",
+    "N1": "Olanda – Eredivisie",     "B1": "Belgio – Pro League",
+    "P1": "Portogallo – Primeira Liga", "T1": "Turchia – Süper Lig",
+    "G1": "Grecia – Super League",
+    # Altre divisioni disponibili: togli il # per aggiungerle
+    # "E2": "Inghilterra – League One", "E3": "Inghilterra – League Two", "EC": "Inghilterra – National League",
+    # "SC2": "Scozia – League One", "SC3": "Scozia – League Two",
+}
+# Campionati "extra" (file in formato diverso, senza risultati del 1° tempo). Togli il # per escluderne uno.
+CAMPIONATI_EXTRA = {
+    "NOR": ("Norway", "Norvegia – Eliteserien"),   "SWE": ("Sweden", "Svezia – Allsvenskan"),
+    "DNK": ("Denmark", "Danimarca – Superliga"),    "FIN": ("Finland", "Finlandia – Veikkausliiga"),
+    "AUT": ("Austria", "Austria – Bundesliga"),     "SWZ": ("Switzerland", "Svizzera – Super League"),
+    "POL": ("Poland", "Polonia – Ekstraklasa"),     "ROU": ("Romania", "Romania – Liga I"),
+    "IRL": ("Ireland", "Irlanda – Premier Division"), "RUS": ("Russia", "Russia – Premier League"),
+}
+QUOTA_GOL_PRIMO_TEMPO = 0.45     # usata per i campionati extra, che non hanno i gol del 1° tempo
+URL_DATI = "https://www.football-data.co.uk/mmz4281/{stagione}/{codice}.csv"
+URL_DATI_EXTRA = "https://www.football-data.co.uk/new/{codice}.csv"
+URL_CALENDARIO_EXTRA = "https://www.football-data.co.uk/new_league_fixtures.csv"
+URL_CALENDARIO = "https://www.football-data.co.uk/fixtures.csv"
+PESO_STAGIONE_PRECEDENTE = 0.5   # a inizio stagione si usa anche la stagione scorsa, con peso ridotto
+MIN_PARTITE_STAGIONE = 80        # sotto questo numero di partite giocate si aggiunge la stagione precedente
 MINUTO_0_0 = 20             # fino a quale minuto deve restare 0-0
 SHRINK = 5                  # partite "virtuali" di media campionato (evita stime estreme a inizio stagione)
 MIN_PARTITE_SQUADRA = 4     # sotto questo numero di partite la stima è segnalata come poco affidabile
@@ -43,8 +70,10 @@ FILE_CONFIG = os.path.join(CARTELLA, "configurazione.json")
 try:
     from zoneinfo import ZoneInfo
     TZ = ZoneInfo("Europe/Rome")
-except Exception:
+    TZ_UK = ZoneInfo("Europe/London")
+except Exception:                                   # Windows senza tzdata: approssimazione ora solare
     TZ = timezone(timedelta(hours=1))
+    TZ_UK = timezone.utc
 
 
 def iso_dt(s):
@@ -60,69 +89,169 @@ def quota_residua(t, s):
 
 
 def costruisci_modello(finite):
-    gh = [m["score"]["fullTime"]["home"] for m in finite]
-    ga = [m["score"]["fullTime"]["away"] for m in finite]
-    H, A = sum(gh) / len(finite), sum(ga) / len(finite)
-    ht = [(m["score"]["halfTime"]["home"] or 0) + (m["score"]["halfTime"]["away"] or 0) for m in finite]
-    tot = sum(gh) + sum(ga)
-    s = sum(ht) / tot if tot else 0.45            # quota di gol segnati nel 1° tempo nel campionato
-    d = defaultdict(lambda: {"hn": 0, "hf": 0, "hs": 0, "an": 0, "af": 0, "as": 0})
-    for m, h, a in zip(finite, gh, ga):
-        th, ta = m["homeTeam"]["name"], m["awayTeam"]["name"]
-        d[th]["hn"] += 1; d[th]["hf"] += h; d[th]["hs"] += a
-        d[ta]["an"] += 1; d[ta]["af"] += a; d[ta]["as"] += h
+    """finite: dizionari con casa, trasf, gc, gt (gol finali), ht (gol 1° tempo o None), w (peso)."""
+    W = sum(m["w"] for m in finite)
+    H = sum(m["w"] * m["gc"] for m in finite) / W
+    A = sum(m["w"] * m["gt"] for m in finite) / W
+    con_ht = [m for m in finite if m["ht"] is not None]
+    tot = sum(m["w"] * (m["gc"] + m["gt"]) for m in con_ht)
+    s = sum(m["w"] * m["ht"] for m in con_ht) / tot if tot else QUOTA_GOL_PRIMO_TEMPO
+    d = defaultdict(lambda: {"hn": 0, "hf": 0, "hs": 0, "an": 0, "af": 0, "as": 0, "g": 0})
+    for m in finite:
+        w, c, t = m["w"], d[m["casa"]], d[m["trasf"]]
+        c["hn"] += w; c["hf"] += w * m["gc"]; c["hs"] += w * m["gt"]
+        t["an"] += w; t["af"] += w * m["gt"]; t["as"] += w * m["gc"]
+        if w == 1:
+            c["g"] += 1; t["g"] += 1
     forza = {t: {"att_casa": (v["hf"] + SHRINK * H) / (v["hn"] + SHRINK) / H,
                  "dif_casa": (v["hs"] + SHRINK * A) / (v["hn"] + SHRINK) / A,
                  "att_trasf": (v["af"] + SHRINK * A) / (v["an"] + SHRINK) / A,
                  "dif_trasf": (v["as"] + SHRINK * H) / (v["an"] + SHRINK) / H,
-                 "giocate": v["hn"] + v["an"]} for t, v in d.items()}
+                 "giocate": v["g"]} for t, v in d.items()}
     return {"H": H, "A": A, "s": s, "forza": forza}
 
 
 def analizza(match, mod, campionato):
-    casa, trasf = match["homeTeam"]["name"], match["awayTeam"]["name"]
+    """match: dizionario con casa, trasf, kickoff (datetime)."""
+    casa, trasf = match["casa"], match["trasf"]
     neutro = {"att_casa": 1, "dif_casa": 1, "att_trasf": 1, "dif_trasf": 1, "giocate": 0}
     fc, ft = mod["forza"].get(casa, neutro), mod["forza"].get(trasf, neutro)
     lam = mod["H"] * fc["att_casa"] * ft["dif_trasf"] + mod["A"] * ft["att_trasf"] * fc["dif_casa"]
     resto = lam * quota_residua(MINUTO_0_0, mod["s"])      # gol attesi dal 20' al 90'
     p00 = math.exp(-(lam - resto))                         # nessun gol nei primi 20'
     pover = 1 - math.exp(-resto) * (1 + resto)             # almeno 2 gol dal 20' in poi
-    kickoff = iso_dt(match["utcDate"])
+    kickoff = match["kickoff"]
     return {"ora": kickoff.astimezone(TZ).strftime("%d/%m %H:%M"), "_kickoff": kickoff,
             "campionato": campionato, "partita": f"{casa} - {trasf}", "gol_attesi": lam,
             "p00": p00, "pover": pover, "pscenario": p00 * pover,
             "affidabile": min(fc["giocate"], ft["giocate"]) >= MIN_PARTITE_SQUADRA}
 
 
-# ========================================================= FOOTBALL-DATA.ORG
-def fd_get(path):
-    req = urllib.request.Request("https://api.football-data.org/v4" + path, headers={"X-Auth-Token": API_KEY})
-    for _ in range(3):
+# ====================================================== FOOTBALL-DATA.CO.UK
+def scarica_csv(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (bot over 1,5)"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        dati = r.read()
+    for enc in ("utf-8-sig", "latin-1"):
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                return json.loads(r.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            if e.code == 429:                     # troppe richieste: aspetta e riprova
-                time.sleep(65); continue
-            raise
-    raise RuntimeError("football-data.org non raggiungibile")
+            testo = dati.decode(enc); break
+        except UnicodeDecodeError:
+            continue
+    return list(csv.DictReader(testo.splitlines()))
+
+
+def leggi_data(riga, fuso):
+    """Data (gg/mm/aa o gg/mm/aaaa) e ora (UK) di una riga, convertite nel fuso italiano."""
+    data = (riga.get("Date") or "").strip()
+    ora = (riga.get("Time") or "15:00").strip() or "15:00"
+    for formato in ("%d/%m/%Y %H:%M", "%d/%m/%y %H:%M"):
+        try:
+            return datetime.strptime(f"{data} {ora}", formato).replace(tzinfo=fuso)
+        except ValueError:
+            continue
+    return None
+
+
+def intero(x):
+    try:
+        return int(float(x))
+    except (TypeError, ValueError):
+        return None
+
+
+def campo(riga, *nomi):
+    for n in nomi:
+        v = riga.get(n)
+        if v not in (None, ""):
+            return v.strip()
+    return ""
+
+
+def risultati_extra(codice):
+    """Campionati extra: un unico file con tutte le stagioni (colonne Season, Home, Away, HG, AG)."""
+    righe = scarica_csv(URL_DATI_EXTRA.format(codice=codice))
+    stagioni = []
+    for r in righe:
+        st = campo(r, "Season")
+        if st and st not in stagioni:
+            stagioni.append(st)
+    stagioni.sort(key=lambda x: x.split("/")[0])
+    if not stagioni:
+        return []
+    def partite(st, peso):
+        out = []
+        for r in righe:
+            if campo(r, "Season") != st:
+                continue
+            gc, gt = intero(campo(r, "HG", "FTHG")), intero(campo(r, "AG", "FTAG"))
+            casa, trasf = campo(r, "Home", "HomeTeam"), campo(r, "Away", "AwayTeam")
+            if gc is None or gt is None or not casa:
+                continue
+            out.append({"casa": casa, "trasf": trasf, "gc": gc, "gt": gt, "ht": None, "w": peso})
+        return out
+    finite = partite(stagioni[-1], 1.0)
+    if len(finite) < MIN_PARTITE_STAGIONE and len(stagioni) > 1:
+        finite += partite(stagioni[-2], PESO_STAGIONE_PRECEDENTE)
+    return finite
+
+
+def stagione(oggi, indietro=0):
+    inizio = oggi.year if oggi.month >= 7 else oggi.year - 1
+    inizio -= indietro
+    return f"{inizio % 100:02d}{(inizio + 1) % 100:02d}"
+
+
+def risultati(codice, oggi):
+    finite = []
+    for indietro, peso in ((0, 1.0), (1, PESO_STAGIONE_PRECEDENTE)):
+        if indietro == 1 and len(finite) >= MIN_PARTITE_STAGIONE:
+            break
+        try:
+            righe = scarica_csv(URL_DATI.format(stagione=stagione(oggi, indietro), codice=codice))
+        except Exception as e:
+            print(f"  ! {codice} stagione {stagione(oggi, indietro)}: non disponibile ({e})")
+            continue
+        for r in righe:
+            gc, gt = intero(r.get("FTHG")), intero(r.get("FTAG"))
+            if gc is None or gt is None or not r.get("HomeTeam"):
+                continue
+            hc, ht = intero(r.get("HTHG")), intero(r.get("HTAG"))
+            finite.append({"casa": r["HomeTeam"].strip(), "trasf": r["AwayTeam"].strip(), "gc": gc, "gt": gt,
+                           "ht": None if hc is None or ht is None else hc + ht, "w": peso})
+        time.sleep(0.5)
+    return finite
 
 
 def scarica(giorni):
     oggi = datetime.now(TZ).date()
     date_ok = {oggi + timedelta(days=i) for i in range(giorni)}
-    righe = []
-    for i, (codice, nome) in enumerate(CAMPIONATI.items()):
-        if i: time.sleep(6.5)                     # piano gratuito: max 10 richieste al minuto
+    calendario = defaultdict(list)
+    paese_codice = {paese.lower(): c for c, (paese, _) in CAMPIONATI_EXTRA.items()}
+    for url in (URL_CALENDARIO, URL_CALENDARIO_EXTRA):
         try:
-            partite = fd_get(f"/competitions/{codice}/matches").get("matches", [])
+            righe_cal = scarica_csv(url)
         except Exception as e:
-            print(f"  ! {nome}: errore ({e})"); continue
-        finite = [m for m in partite if m["status"] == "FINISHED" and m["score"]["fullTime"]["home"] is not None]
-        prossime = [m for m in partite if m["status"] in ("SCHEDULED", "TIMED")
-                    and iso_dt(m["utcDate"]).astimezone(TZ).date() in date_ok]
-        print(f"  {nome}: {len(finite)} giocate, {len(prossime)} in programma")
-        if len(finite) >= 20 and prossime:
+            print(f"  ! calendario {url.rsplit('/', 1)[-1]} non disponibile ({e})"); continue
+        for r in righe_cal:
+            div = campo(r, "Div")
+            if div not in CAMPIONATI:
+                div = paese_codice.get(campo(r, "Country").lower(), div)
+            k = leggi_data(r, TZ_UK)
+            if (div in CAMPIONATI or div in CAMPIONATI_EXTRA) and k and k.astimezone(TZ).date() in date_ok:
+                calendario[div].append({"casa": campo(r, "HomeTeam", "Home"), "trasf": campo(r, "AwayTeam", "Away"),
+                                        "kickoff": k})
+    righe = []
+    tutti = {**CAMPIONATI, **{c: nome for c, (_, nome) in CAMPIONATI_EXTRA.items()}}
+    for codice, nome in tutti.items():
+        prossime = calendario.get(codice, [])
+        if not prossime:
+            continue
+        try:
+            finite = risultati_extra(codice) if codice in CAMPIONATI_EXTRA else risultati(codice, oggi)
+        except Exception as e:
+            print(f"  ! {nome}: risultati non disponibili ({e})"); continue
+        print(f"  {nome}: {sum(1 for m in finite if m['w'] == 1)} giocate in stagione, {len(prossime)} in programma")
+        if len(finite) >= 20:
             mod = costruisci_modello(finite)
             righe += [analizza(m, mod, nome) for m in prossime]
     return righe
@@ -144,13 +273,12 @@ def righe_demo():
         for i in range(0, 20, 2):
             h, a = squadre[i], squadre[i + 1]
             gh, ga = pois(1.5 * att[h] / att[a] ** 0.3), pois(1.15 * att[a] / att[h] ** 0.3)
-            finite.append({"homeTeam": {"name": h}, "awayTeam": {"name": a},
-                           "score": {"fullTime": {"home": gh, "away": ga},
-                                     "halfTime": {"home": min(gh, pois(0.65)), "away": min(ga, pois(0.5))}}})
+            finite.append({"casa": h, "trasf": a, "gc": gh, "gt": ga,
+                           "ht": min(gh, pois(0.65)) + min(ga, pois(0.5)), "w": 1.0})
     mod = costruisci_modello(finite)
     base = datetime.now(timezone.utc).replace(hour=14, minute=0, second=0, microsecond=0)
-    prossime = [{"homeTeam": {"name": squadre[i]}, "awayTeam": {"name": squadre[i + 1]},
-                 "utcDate": (base + timedelta(hours=i // 8)).isoformat().replace("+00:00", "Z")} for i in range(0, 20, 2)]
+    prossime = [{"casa": squadre[i], "trasf": squadre[i + 1], "kickoff": base + timedelta(hours=i // 8)}
+                for i in range(0, 20, 2)]
     return [analizza(m, mod, "Campionato DEMO") for m in prossime]
 
 
@@ -270,7 +398,6 @@ def configura_telegram():
         raise SystemExit("Nessun messaggio trovato: scrivi al tuo bot su Telegram e rilancia la configurazione.")
     TELEGRAM_CHAT_ID = str(chat[-1])
     conf.update({"telegram_token": TELEGRAM_TOKEN, "telegram_chat_id": TELEGRAM_CHAT_ID})
-    conf.setdefault("football_data_key", API_KEY)
     with open(FILE_CONFIG, "w", encoding="utf-8") as f:
         json.dump(conf, f, indent=2)
     if invia_telegram("✅ Bot Over 1,5 collegato: riceverai qui la classifica ogni giorno."):
@@ -278,28 +405,14 @@ def configura_telegram():
 
 
 def carica_configurazione(automatico=False):
-    """Legge la chiave API (e Telegram) da configurazione.json; al primo avvio la chiede e la salva."""
-    global API_KEY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+    """Legge Telegram da configurazione.json; al primo avvio a mano propone di collegarlo."""
+    global TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
     conf = {}
     if os.path.exists(FILE_CONFIG):
         with open(FILE_CONFIG, encoding="utf-8") as f:
             conf = json.load(f)
-    API_KEY = API_KEY or conf.get("football_data_key", "")
     TELEGRAM_TOKEN = TELEGRAM_TOKEN or conf.get("telegram_token", "")
     TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID or conf.get("telegram_chat_id", "")
-    if not API_KEY and automatico:
-        raise SystemExit("Manca la chiave football-data.org: avvia il programma una volta a mano per inserirla.")
-    if not API_KEY:
-        print("Primo avvio: serve la tua chiave gratuita di football-data.org")
-        print("(la ricevi via email dopo la registrazione su https://www.football-data.org)\n")
-        API_KEY = input("Incolla qui la chiave e premi Invio: ").strip()
-        if not API_KEY:
-            raise SystemExit("Nessuna chiave inserita.")
-        conf.setdefault("telegram_token", ""); conf.setdefault("telegram_chat_id", "")
-        conf["football_data_key"] = API_KEY
-        with open(FILE_CONFIG, "w", encoding="utf-8") as f:
-            json.dump(conf, f, indent=2)
-        print(f"Chiave salvata in {FILE_CONFIG}\n")
     if not automatico and not TELEGRAM_TOKEN and conf.get("chiedi_telegram", True):
         risp = input("Vuoi ricevere la classifica ogni giorno su Telegram? (s/n): ").strip().lower()
         if risp.startswith("s"):
@@ -307,7 +420,6 @@ def carica_configurazione(automatico=False):
             print()
         else:
             conf["chiedi_telegram"] = False
-            conf["football_data_key"] = API_KEY
             with open(FILE_CONFIG, "w", encoding="utf-8") as f:
                 json.dump(conf, f, indent=2)
             print("Ok. Potrai collegarlo in seguito con l'opzione --configura-telegram.\n")
@@ -334,7 +446,7 @@ def main():
         righe = righe_demo()
     else:
         carica_configurazione(AUTOMATICO)
-        print("Scarico i dati da football-data.org…")
+        print("Scarico i dati da football-data.co.uk…")
         righe = scarica(a.giorni)
     if not righe:
         print("Nessuna partita in programma nei campionati selezionati.")
