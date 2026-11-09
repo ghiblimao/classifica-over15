@@ -13,11 +13,12 @@ Dati: football-data.co.uk (gratuiti, nessuna chiave necessaria).
 Uso:   python bot_over15.py            (oggi, apre il report nel browser)
        python bot_over15.py --automatico       (avvio pianificato: report + Telegram, senza finestre)
        python bot_over15.py --configura-telegram (collega il tuo Telegram)
+       python bot_over15.py --prova-api-football (verifica la chiave API-Football)
        python bot_over15.py --web docs         (usato da GitHub: crea la pagina web in docs/)
        python bot_over15.py --giorni 2 (oggi e domani)
        python bot_over15.py --demo     (prova con dati inventati, senza internet)
 """
-import argparse, csv, json, math, os, random, sys, time, html, webbrowser
+import argparse, csv, json, math, os, random, sys, time, html, webbrowser, unicodedata
 from pathlib import Path
 import urllib.request, urllib.parse, urllib.error
 from collections import defaultdict
@@ -47,7 +48,65 @@ CAMPIONATI_EXTRA = {
     "POL": ("Poland", "Polonia – Ekstraklasa"),     "ROU": ("Romania", "Romania – Liga I"),
     "IRL": ("Ireland", "Irlanda – Premier Division"), "RUS": ("Russia", "Russia – Premier League"),
 }
-QUOTA_GOL_PRIMO_TEMPO = 0.45     # usata per i campionati extra, che non hanno i gol del 1° tempo
+# --- API-Football (facoltativo): completa i campionati che football-data non ha ---
+API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY", "")
+API_FOOTBALL_URL = "https://v3.football.api-sports.io"
+MAX_RICHIESTE_API = 90           # il piano gratuito ne concede 100 al giorno: ne teniamo 10 di scorta
+# Campionati da prendere da API-Football: paese (come lo scrive API-Football) -> nomi dei campionati.
+# Sono le serie A e B europee che football-data non copre. Se nel log compare un campionato
+# "non incluso" che ti interessa, aggiungi qui il suo nome esattamente come appare.
+API_CAMPIONATI = {
+    "Netherlands": ["Eerste Divisie"],            "Belgium": ["Challenger Pro League"],
+    "Portugal": ["Segunda Liga", "Liga Portugal 2"], "Turkey": ["1. Lig"],
+    "Greece": ["Super League 2"],                 "Austria": ["2. Liga"],
+    "Switzerland": ["Challenge League"],          "Denmark": ["1. Division"],
+    "Norway": ["1. Division", "OBOS-ligaen"],     "Sweden": ["Superettan"],
+    "Poland": ["I Liga"],                         "Finland": ["Ykkonen", "Ykkosliiga"],
+    "Romania": ["Liga II"],                       "Russia": ["FNL"],
+    "Ireland": ["First Division"],
+    "Czech-Republic": ["Czech Liga", "1. Liga", "FNL"], "Croatia": ["HNL", "First NL", "Prva NL"],
+    "Serbia": ["Super Liga", "Prva Liga"],        "Hungary": ["NB I", "NB II"],
+    "Slovakia": ["Super Liga", "2. liga"],        "Slovenia": ["1. SNL", "2. SNL"],
+    "Bulgaria": ["First League", "Second League"], "Ukraine": ["Premier League", "Persha Liga"],
+    "Cyprus": ["1. Division", "2. Division"],     "Israel": ["Ligat ha'Al", "Liga Leumit"],
+    "Iceland": ["Urvalsdeild", "1. Deild"],       "Bosnia": ["Premijer Liga"],
+}
+# Se football-data oggi non ha le partite di un suo campionato (calendario non ancora aggiornato),
+# il bot le prende da API-Football usando questa corrispondenza.
+FD_SU_API = {
+    "I1": ("Italy", ["Serie A"]), "I2": ("Italy", ["Serie B"]), "E0": ("England", ["Premier League"]),
+    "E1": ("England", ["Championship"]), "SP1": ("Spain", ["La Liga"]), "SP2": ("Spain", ["Segunda Division"]),
+    "D1": ("Germany", ["Bundesliga"]), "D2": ("Germany", ["2. Bundesliga"]), "F1": ("France", ["Ligue 1"]),
+    "F2": ("France", ["Ligue 2"]), "SC0": ("Scotland", ["Premiership"]), "SC1": ("Scotland", ["Championship"]),
+    "N1": ("Netherlands", ["Eredivisie"]), "B1": ("Belgium", ["Jupiler Pro League"]),
+    "P1": ("Portugal", ["Primeira Liga"]), "T1": ("Turkey", ["Super Lig"]), "G1": ("Greece", ["Super League 1"]),
+    "NOR": ("Norway", ["Eliteserien"]), "SWE": ("Sweden", ["Allsvenskan"]), "DNK": ("Denmark", ["Superliga"]),
+    "FIN": ("Finland", ["Veikkausliiga"]), "AUT": ("Austria", ["Bundesliga"]),
+    "SWZ": ("Switzerland", ["Super League"]), "POL": ("Poland", ["Ekstraklasa"]),
+    "ROU": ("Romania", ["Liga I", "SuperLiga"]), "IRL": ("Ireland", ["Premier Division"]),
+    "RUS": ("Russia", ["Premier League"]),
+}
+PAESI_IT = {"Netherlands": "Olanda", "Belgium": "Belgio", "Portugal": "Portogallo", "Turkey": "Turchia",
+            "Greece": "Grecia", "Austria": "Austria", "Switzerland": "Svizzera", "Denmark": "Danimarca",
+            "Norway": "Norvegia", "Sweden": "Svezia", "Poland": "Polonia", "Finland": "Finlandia",
+            "Romania": "Romania", "Russia": "Russia", "Ireland": "Irlanda", "Czech-Republic": "Rep. Ceca",
+            "Croatia": "Croazia", "Serbia": "Serbia", "Hungary": "Ungheria", "Slovakia": "Slovacchia",
+            "Slovenia": "Slovenia", "Bulgaria": "Bulgaria", "Ukraine": "Ucraina", "Cyprus": "Cipro",
+            "Israel": "Israele", "Iceland": "Islanda", "Bosnia": "Bosnia", "Italy": "Italia",
+            "England": "Inghilterra", "Spain": "Spagna", "Germany": "Germania", "France": "Francia",
+            "Scotland": "Scozia", "Albania": "Albania", "Estonia": "Estonia", "Latvia": "Lettonia",
+            "Lithuania": "Lituania", "Belarus": "Bielorussia", "Georgia": "Georgia", "Armenia": "Armenia",
+            "Azerbaijan": "Azerbaigian", "Kazakhstan": "Kazakistan", "Moldova": "Moldavia",
+            "Montenegro": "Montenegro", "North-Macedonia": "Macedonia del Nord", "Wales": "Galles",
+            "Northern-Ireland": "Irlanda del Nord", "Luxembourg": "Lussemburgo", "Malta": "Malta",
+            "Faroe-Islands": "Fær Øer", "Andorra": "Andorra", "San-Marino": "San Marino", "Gibraltar": "Gibilterra",
+            "Kosovo": "Kosovo", "Liechtenstein": "Liechtenstein"}
+PAROLE_ESCLUSE = ("cup", "pokal", "coppa", "copa", "coupe", "beker", "taca", "kupa", "friendl", "women", "femin",
+                  "u17", "u18", "u19", "u20", "u21", "u23", "youth", "reserve", "primavera", "super cup", "supercup")
+# Quota di gol del 1° tempo: per ogni campionato viene calcolata dai suoi risultati reali.
+# Dove la fonte non ha i risultati del 1° tempo, si usa la media reale degli altri campionati analizzati
+# e la partita viene segnalata come "1° tempo stimato". Questo valore serve solo se non c'è nessun dato reale.
+QUOTA_RISERVA_SOLO_EMERGENZA = 0.45
 URL_DATI = "https://www.football-data.co.uk/mmz4281/{stagione}/{codice}.csv"
 URL_DATI_EXTRA = "https://www.football-data.co.uk/new/{codice}.csv"
 URL_CALENDARIO_EXTRA = "https://www.football-data.co.uk/new_league_fixtures.csv"
@@ -90,12 +149,9 @@ def quota_residua(t, s):
 
 def costruisci_modello(finite):
     """finite: dizionari con casa, trasf, gc, gt (gol finali), ht (gol 1° tempo o None), w (peso)."""
-    W = sum(m["w"] for m in finite)
-    H = sum(m["w"] * m["gc"] for m in finite) / W
-    A = sum(m["w"] * m["gt"] for m in finite) / W
     con_ht = [m for m in finite if m["ht"] is not None]
     tot = sum(m["w"] * (m["gc"] + m["gt"]) for m in con_ht)
-    s = sum(m["w"] * m["ht"] for m in con_ht) / tot if tot else QUOTA_GOL_PRIMO_TEMPO
+    s = sum(m["w"] * m["ht"] for m in con_ht) / tot if tot else None     # None = nessun dato reale
     d = defaultdict(lambda: {"hn": 0, "hf": 0, "hs": 0, "an": 0, "af": 0, "as": 0, "g": 0})
     for m in finite:
         w, c, t = m["w"], d[m["casa"]], d[m["trasf"]]
@@ -103,12 +159,21 @@ def costruisci_modello(finite):
         t["an"] += w; t["af"] += w * m["gt"]; t["as"] += w * m["gc"]
         if w == 1:
             c["g"] += 1; t["g"] += 1
+    mod = modello_da_totali(d, s)
+    mod["n_ht"] = sum(m["w"] for m in con_ht)
+    return mod
+
+
+def modello_da_totali(d, s):
+    """d: per squadra partite (hn/an), gol fatti (hf/af) e subiti (hs/as) in casa e in trasferta."""
+    H = sum(v["hf"] for v in d.values()) / max(1e-9, sum(v["hn"] for v in d.values()))
+    A = sum(v["af"] for v in d.values()) / max(1e-9, sum(v["an"] for v in d.values()))
     forza = {t: {"att_casa": (v["hf"] + SHRINK * H) / (v["hn"] + SHRINK) / H,
                  "dif_casa": (v["hs"] + SHRINK * A) / (v["hn"] + SHRINK) / A,
                  "att_trasf": (v["af"] + SHRINK * A) / (v["an"] + SHRINK) / A,
                  "dif_trasf": (v["as"] + SHRINK * H) / (v["an"] + SHRINK) / H,
                  "giocate": v["g"]} for t, v in d.items()}
-    return {"H": H, "A": A, "s": s, "forza": forza}
+    return {"H": H, "A": A, "s": s, "s_reale": s is not None, "n_ht": 0, "forza": forza}
 
 
 def analizza(match, mod, campionato):
@@ -124,7 +189,8 @@ def analizza(match, mod, campionato):
     return {"ora": kickoff.astimezone(TZ).strftime("%d/%m %H:%M"), "_kickoff": kickoff,
             "campionato": campionato, "partita": f"{casa} - {trasf}", "gol_attesi": lam,
             "p00": p00, "pover": pover, "pscenario": p00 * pover,
-            "affidabile": min(fc["giocate"], ft["giocate"]) >= MIN_PARTITE_SQUADRA}
+            "affidabile": min(fc["giocate"], ft["giocate"]) >= MIN_PARTITE_SQUADRA,
+            "ht_stimato": not mod["s_reale"], "quota_ht": mod["s"]}
 
 
 # ====================================================== FOOTBALL-DATA.CO.UK
@@ -222,6 +288,118 @@ def risultati(codice, oggi):
     return finite
 
 
+# ============================================================== API-FOOTBALL
+class ApiFootball:
+    def __init__(self, chiave):
+        self.chiave, self.usate, self.bloccata = chiave, 0, False
+
+    def get(self, percorso, **parametri):
+        if self.usate >= MAX_RICHIESTE_API:
+            raise RuntimeError(f"raggiunto il limite di {MAX_RICHIESTE_API} richieste impostato")
+        url = f"{API_FOOTBALL_URL}/{percorso}" + ("?" + urllib.parse.urlencode(parametri) if parametri else "")
+        req = urllib.request.Request(url, headers={"x-apisports-key": self.chiave})
+        self.usate += 1
+        with urllib.request.urlopen(req, timeout=60) as r:
+            dati = json.loads(r.read().decode("utf-8"))
+        time.sleep(6.5)                          # piano gratuito: max 10 richieste al minuto
+        errori = dati.get("errors")
+        if errori:
+            raise RuntimeError("; ".join(f"{k}: {v}" for k, v in errori.items()) if isinstance(errori, dict) else str(errori))
+        return dati.get("response", [])
+
+
+def norm(t):
+    return unicodedata.normalize("NFKD", t or "").encode("ascii", "ignore").decode().lower().strip()
+
+
+def modello_da_classifica(api, lega_id, stagione_api):
+    gruppi = api.get("standings", league=lega_id, season=stagione_api)
+    d = {}
+    for blocco in gruppi:
+        for gruppo in blocco.get("league", {}).get("standings", []):
+            for riga in gruppo:
+                nome = riga["team"]["name"]
+                h, a = riga.get("home", {}), riga.get("away", {})
+                giocate = (h.get("played") or 0) + (a.get("played") or 0)
+                if nome in d and d[nome]["g"] >= giocate:
+                    continue
+                d[nome] = {"hn": h.get("played") or 0, "hf": (h.get("goals") or {}).get("for") or 0,
+                           "hs": (h.get("goals") or {}).get("against") or 0,
+                           "an": a.get("played") or 0, "af": (a.get("goals") or {}).get("for") or 0,
+                           "as": (a.get("goals") or {}).get("against") or 0, "g": giocate}
+    if sum(v["hn"] for v in d.values()) < 20:
+        return None
+    return modello_da_totali(d, None)         # la classifica non ha i gol del 1° tempo
+
+
+def scarica_api_football(date_ok, fd_senza_partite, s_media):
+    """Partite dei campionati mancanti (e di quelli football-data senza calendario aggiornato)."""
+    api = ApiFootball(API_FOOTBALL_KEY)
+    cercati = {norm(p): {norm(n) for n in nomi} for p, nomi in API_CAMPIONATI.items()}
+    for codice in fd_senza_partite:
+        if codice in FD_SU_API:
+            p, nomi = FD_SU_API[codice]
+            cercati.setdefault(norm(p), set()).update(norm(n) for n in nomi)
+    gia_coperti = {(norm(p), norm(n)) for p, nomi in FD_SU_API.values() for n in nomi}
+    leghe, esclusi = defaultdict(list), set()
+    for giorno in sorted(date_ok):
+        for f in api.get("fixtures", date=giorno.isoformat(), timezone="Europe/Rome"):
+            if (f.get("fixture", {}).get("status", {}).get("short") or "") not in ("NS", "TBD"):
+                continue
+            lega = f["league"]
+            paese, nome = lega.get("country") or "", lega.get("name") or ""
+            if norm(nome) in cercati.get(norm(paese), set()):
+                leghe[(lega["id"], lega["season"], paese, nome)].append(
+                    {"casa": f["teams"]["home"]["name"], "trasf": f["teams"]["away"]["name"],
+                     "kickoff": iso_dt(f["fixture"]["date"])})
+            elif (paese in PAESI_IT and (norm(paese), norm(nome)) not in gia_coperti
+                  and not any(p in norm(nome) for p in PAROLE_ESCLUSE)):
+                esclusi.add(f"{paese} – {nome}")
+    print(f"  API-Football: {sum(len(v) for v in leghe.values())} partite in {len(leghe)} campionati da completare")
+    righe = []
+    for (lega_id, stagione_api, paese, nome), prossime in leghe.items():
+        etichetta = f"{PAESI_IT.get(paese, paese)} – {nome}"
+        try:
+            mod = modello_da_classifica(api, lega_id, stagione_api)
+        except Exception as e:
+            print(f"  ! {etichetta}: classifica non disponibile ({e})")
+            if "plan" in str(e).lower() or "limite" in str(e).lower():
+                print("  ! Interrompo le richieste ad API-Football per oggi."); break
+            continue
+        if mod is None:
+            print(f"  ! {etichetta}: troppo poche partite giocate"); continue
+        mod["s"] = s_media                     # stimata: la riga sarà segnalata
+        print(f"  {etichetta} (API-Football): {len(prossime)} in programma")
+        righe += [analizza(m, mod, etichetta) for m in prossime]
+    if esclusi:
+        print("  Altri campionati europei oggi, non inclusi (aggiungili in API_CAMPIONATI se ti interessano):")
+        for e in sorted(esclusi):
+            print("    -", e)
+    print(f"  Richieste API-Football usate: {api.usate}")
+    return righe
+
+
+def prova_api_football():
+    if not API_FOOTBALL_KEY:
+        raise SystemExit("Nessuna chiave API-Football configurata.")
+    api = ApiFootball(API_FOOTBALL_KEY)
+    stato = api.get("status")
+    info = stato if isinstance(stato, dict) else (stato[0] if stato else {})
+    piano = info.get("subscription", {}).get("plan", "?")
+    rich = info.get("requests", {})
+    print(f"Chiave valida. Piano: {piano} – richieste oggi: {rich.get('current', '?')}/{rich.get('limit_day', '?')}")
+    oggi = datetime.now(TZ).date()
+    partite = api.get("fixtures", date=oggi.isoformat(), timezone="Europe/Rome")
+    serie_b = [f for f in partite if norm(f["league"].get("country")) == "italy" and norm(f["league"].get("name")) == "serie b"]
+    stag = serie_b[0]["league"]["season"] if serie_b else (oggi.year if oggi.month >= 7 else oggi.year - 1)
+    try:
+        mod = modello_da_classifica(api, 136, stag)       # 136 = Serie B su API-Football
+        print(f"Stagione in corso ({stag}) ACCESSIBILE: il bot può usare API-Football."
+              if mod else f"Stagione {stag} accessibile ma con pochi dati.")
+    except Exception as e:
+        print(f"Stagione in corso ({stag}) NON accessibile con questo piano: {e}")
+
+
 def scarica(giorni):
     oggi = datetime.now(TZ).date()
     date_ok = {oggi + timedelta(days=i) for i in range(giorni)}
@@ -242,6 +420,8 @@ def scarica(giorni):
                                         "kickoff": k})
     righe = []
     tutti = {**CAMPIONATI, **{c: nome for c, (_, nome) in CAMPIONATI_EXTRA.items()}}
+    fd_senza_partite = [c for c in tutti if not calendario.get(c)]
+    in_attesa = []
     for codice, nome in tutti.items():
         prossime = calendario.get(codice, [])
         if not prossime:
@@ -252,8 +432,26 @@ def scarica(giorni):
             print(f"  ! {nome}: risultati non disponibili ({e})"); continue
         print(f"  {nome}: {sum(1 for m in finite if m['w'] == 1)} giocate in stagione, {len(prossime)} in programma")
         if len(finite) >= 20:
-            mod = costruisci_modello(finite)
-            righe += [analizza(m, mod, nome) for m in prossime]
+            in_attesa.append((costruisci_modello(finite), prossime, nome))
+        else:
+            fd_senza_partite.append(codice)
+    # media REALE della quota di gol nel 1° tempo, dai campionati che hanno il dato
+    reali = [(m["s"], m["n_ht"]) for m, _, _ in in_attesa if m["s_reale"]]
+    if reali:
+        s_media = sum(v * n for v, n in reali) / sum(n for _, n in reali)
+        print(f"  Quota media reale di gol nel 1° tempo (per i campionati senza dato): {s_media:.1%}")
+    else:
+        s_media = QUOTA_RISERVA_SOLO_EMERGENZA
+        print("  ! Nessun dato reale sul 1° tempo oggi: uso il valore di emergenza (partite segnalate)")
+    for mod, prossime, nome in in_attesa:
+        if not mod["s_reale"]:
+            mod["s"] = s_media
+        righe += [analizza(m, mod, nome) for m in prossime]
+    if API_FOOTBALL_KEY:
+        try:
+            righe += scarica_api_football(date_ok, fd_senza_partite, s_media)
+        except Exception as e:
+            print(f"  ! API-Football non disponibile oggi ({e}): uso solo football-data")
     return righe
 
 
@@ -283,6 +481,15 @@ def righe_demo():
 
 
 # ===================================================================== OUTPUT
+def nota(r):
+    n = []
+    if r.get("ht_stimato"):
+        n.append(f"1° tempo stimato ({r['quota_ht']:.0%})")
+    if not r["affidabile"]:
+        n.append("pochi dati")
+    return " · ".join(n)
+
+
 def pc(x):
     return f"{x:.0%}"
 
@@ -298,31 +505,34 @@ def salva(righe):
     with open(p_csv, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
         w.writerow(["Ora", "Classifica", "Campionato", "Partita", "Gol attesi", f"P 0-0 al {MINUTO_0_0}'",
-                    f"P Over 1,5 se 0-0 al {MINUTO_0_0}'", "P scenario completo", "Dati affidabili"])
+                    f"P Over 1,5 se 0-0 al {MINUTO_0_0}'", "P scenario completo", "Attendibilità"])
         for r in righe:
             w.writerow([r["ora"], r["pos"], r["campionato"], r["partita"], f"{r['gol_attesi']:.2f}".replace(".", ","),
                         pc(r["p00"]), pc(r["pover"]), f"{r['pscenario']:.1%}".replace(".", ","),
-                        "sì" if r["affidabile"] else "NO"])
+                        ("ATTENZIONE: " + nota(r)) if nota(r) else "ok"])
     corpo = "".join(
-        f"<tr{'' if r['affidabile'] else ' class=poco'}><td>{r['ora']}</td>"
+        f"<tr{' class=poco' if nota(r) else ''}><td>{r['ora']}</td>"
         f"<td{' class=top' if r['pos'] <= TOP_TELEGRAM else ''}>{r['pos']}</td><td>{html.escape(r['campionato'])}</td>"
         f"<td class=p>{html.escape(r['partita'])}</td><td>{r['gol_attesi']:.2f}</td><td>{pc(r['p00'])}</td>"
-        f"<td>{pc(r['pover'])}</td><td class=v>{r['pscenario']:.1%}</td></tr>" for r in righe) or \
-        "<tr><td colspan=8>Nessuna partita oggi nei campionati selezionati.</td></tr>"
+        f"<td>{pc(r['pover'])}</td><td class=v>{r['pscenario']:.1%}</td>"
+        f"<td class=nota>{('⚠ ' + html.escape(nota(r))) if nota(r) else 'ok'}</td></tr>" for r in righe) or \
+        "<tr><td colspan=9>Nessuna partita oggi nei campionati selezionati.</td></tr>"
     pagina = f"""<!doctype html><html lang="it"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Over 1,5 – {giorno}</title><style>
 body{{font-family:Arial,sans-serif;margin:20px;color:#222}} table{{border-collapse:collapse;font-size:14px}}
 th,td{{border:1px solid #ccc;padding:6px 9px;text-align:center}} th{{background:#1F3864;color:#fff}}
 td.p{{text-align:left;font-weight:bold}} td.v{{font-weight:bold;background:#DDEBF7}} td.top{{font-weight:bold;background:#E2EFDA}}
-tr.poco{{color:#999}} .wrap{{overflow-x:auto}} p{{max-width:820px;font-size:13px}}</style>
+tr.poco{{color:#888}} td.nota{{font-size:12px;text-align:left;color:#B45F06}} .wrap{{overflow-x:auto}} p{{max-width:820px;font-size:13px}}</style>
 <h2>Partite del {giorno} più adatte alla strategia</h2>
 <p><b>P 0-0 al {MINUTO_0_0}'</b> = probabilità che la partita sia ancora 0-0 al {MINUTO_0_0}'.
 <b>P Over 1,5 se 0-0</b> = probabilità che da lì arrivino almeno 2 gol.
 <b>P scenario completo</b> = le due cose insieme. Partite in ordine di orario; <b>Classifica</b> = posizione per
 P scenario completo (1 = la migliore del giorno), con le prime {TOP_TELEGRAM} evidenziate.
-Righe grigie = squadre con poche partite giocate, stima poco affidabile.</p>
+Righe grigie con ⚠ = stima meno attendibile: <b>pochi dati</b> (squadre con poche partite giocate) oppure
+<b>1° tempo stimato</b> (la fonte non ha i risultati del primo tempo per quel campionato: la quota di gol nel 1° tempo
+è la media reale degli altri campionati del giorno, indicata tra parentesi, e la P 0-0 al {MINUTO_0_0}' è meno precisa).</p>
 <div class="wrap"><table><tr><th>Ora</th><th>Classifica</th><th>Campionato</th><th>Partita</th><th>Gol attesi</th>
-<th>P 0-0 al {MINUTO_0_0}'</th><th>P Over 1,5 se 0-0</th><th>P scenario completo</th></tr>{corpo}</table></div>
+<th>P 0-0 al {MINUTO_0_0}'</th><th>P Over 1,5 se 0-0</th><th>P scenario completo</th><th>Attendibilità</th></tr>{corpo}</table></div>
 <p>Modello statistico semplice: non considera formazioni, infortuni, meteo o motivazioni. Usalo come filtro, non come certezza.</p></html>"""
     p_html = os.path.join(CARTELLA_REPORT, f"over15_{giorno}.html")
     with open(p_html, "w", encoding="utf-8") as f:
@@ -372,7 +582,7 @@ def telegram(righe):
         testo += (f"{r['pos']}. {r['ora'][-5:]}  {r['partita']}\n"
                   f"    {r['campionato']} · scenario {r['pscenario']:.0%} "
                   f"(0-0 al {MINUTO_0_0}' {pc(r['p00'])}, poi Over {pc(r['pover'])})"
-                  + ("  ⚠ pochi dati" if not r["affidabile"] else "") + "\n")
+                  + (f"  ⚠ {nota(r)}" if nota(r) else "") + "\n")
     if PAGINA_URL:
         testo += f"\nClassifica completa: {PAGINA_URL}"
     invia_telegram(testo)
@@ -411,8 +621,21 @@ def carica_configurazione(automatico=False):
     if os.path.exists(FILE_CONFIG):
         with open(FILE_CONFIG, encoding="utf-8") as f:
             conf = json.load(f)
+    global API_FOOTBALL_KEY
     TELEGRAM_TOKEN = TELEGRAM_TOKEN or conf.get("telegram_token", "")
     TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID or conf.get("telegram_chat_id", "")
+    API_FOOTBALL_KEY = API_FOOTBALL_KEY or conf.get("api_football_key", "")
+    if not automatico and not API_FOOTBALL_KEY and conf.get("chiedi_api_football", True):
+        print("Facoltativo: con una chiave gratuita di API-Football (api-football.com) il bot aggiunge le serie B")
+        print("e i campionati europei mancanti.")
+        chiave = input("Incolla la chiave e premi Invio, oppure premi solo Invio per saltare: ").strip()
+        if chiave:
+            API_FOOTBALL_KEY = conf["api_football_key"] = chiave
+        else:
+            conf["chiedi_api_football"] = False
+        with open(FILE_CONFIG, "w", encoding="utf-8") as f:
+            json.dump(conf, f, indent=2)
+        print()
     if not automatico and not TELEGRAM_TOKEN and conf.get("chiedi_telegram", True):
         risp = input("Vuoi ricevere la classifica ogni giorno su Telegram? (s/n): ").strip().lower()
         if risp.startswith("s"):
@@ -431,6 +654,7 @@ def main():
     ap.add_argument("--demo", action="store_true", help="prova con dati inventati, senza internet")
     ap.add_argument("--automatico", action="store_true", help="avvio pianificato: niente browser né domande, solo report e Telegram")
     ap.add_argument("--web", metavar="CARTELLA", help="genera il sito (index.html + archivio) nella cartella indicata, per GitHub Pages")
+    ap.add_argument("--prova-api-football", action="store_true", help="verifica la chiave API-Football e la stagione accessibile")
     ap.add_argument("--configura-telegram", action="store_true", help="procedura guidata per collegare Telegram")
     a = ap.parse_args()
     global AUTOMATICO
@@ -438,6 +662,10 @@ def main():
     if a.web:
         global CARTELLA_REPORT
         CARTELLA_REPORT = os.path.join(a.web, "archivio")
+    if a.prova_api_football:
+        carica_configurazione(automatico=True)
+        prova_api_football()
+        pausa(); return
     if a.configura_telegram:
         carica_configurazione(automatico=True) if os.path.exists(FILE_CONFIG) else None
         configura_telegram()
