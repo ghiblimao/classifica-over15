@@ -54,12 +54,12 @@ jobs:
           git commit -m "Classifica del $(TZ=Europe/Rome date +%Y-%m-%d)" || echo "Niente da salvare"
           git push
 
-      - uses: actions/configure-pages@v6
+      - uses: actions/configure-pages@v5
 
-      - uses: actions/upload-pages-artifact@v5
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: docs
 
       - name: Pubblica la pagina
         id: pubblicazione
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@v4
