@@ -1,19 +1,27 @@
 name: Classifica Over 1,5
 
 on:
-  schedule:
-    # Due orari (UTC) con minuti "non tondi": GitHub a volte ritarda o salta gli avvii allo scoccare dell'ora.
-    # Il secondo fa da riserva: se la classifica di oggi c'è già, non fa nulla.
-    - cron: "23 6 * * *"    # 07:23 ora solare italiana (08:23 ora legale)
-    - cron: "47 8 * * *"    # 09:47 ora solare italiana (10:47 ora legale)
-  workflow_dispatch:         # pulsante "Run workflow" per avviarlo a mano
+  repository_dispatch:       # avvio principale: arriva da cron-job.org all'orario esatto
+    types: [classifica]
+  schedule:                  # riserva: GitHub può ritardare questi avvii anche di molte ore
+    - cron: "23 6 * * *"
+  workflow_dispatch:         # pulsante "Run workflow" per avviarlo a mano (ricalcola sempre)
 
 permissions:
-  contents: write
+  contents: write            # per salvare l'archivio nel repository
+  pages: write               # per pubblicare la pagina
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   classifica:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.pubblicazione.outputs.page_url }}
     steps:
       - uses: actions/checkout@v6
 
@@ -23,22 +31,35 @@ jobs:
 
       - name: Calcola la classifica
         env:
+          FOOTBALL_DATA_KEY: ${{ secrets.FOOTBALL_DATA_KEY }}
+          # API-Football: usata solo se esiste il segreto API_FOOTBALL_KEY. Aggiungilo solo quando
+          # API-Football conferma che puoi usarla da GitHub, altrimenti l'account viene sospeso di nuovo.
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PAGINA_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
         run: |
           OGGI=$(TZ=Europe/Rome date +%Y-%m-%d)
-          if [ "${{ github.event_name }}" = "schedule" ] && [ -f "docs/archivio/over15_$OGGI.html" ]; then
-            echo "La classifica di oggi è già pubblicata: niente da fare."
-            exit 0
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -f "docs/archivio/over15_$OGGI.html" ]; then
+            echo "La classifica di oggi è già pubblicata: niente da ricalcolare."
+          else
+            python bot_over15.py --web docs
           fi
-          python bot_over15.py --web docs
 
-      - name: Pubblica la pagina
+      - name: Salva l'archivio nel repository
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
           git add docs
-          git commit -m "Classifica del $(TZ=Europe/Rome date +%Y-%m-%d)" || echo "Niente da aggiornare"
+          git commit -m "Classifica del $(TZ=Europe/Rome date +%Y-%m-%d)" || echo "Niente da salvare"
           git push
+
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs
+
+      - name: Pubblica la pagina
+        id: pubblicazione
+        uses: actions/deploy-pages@v5
