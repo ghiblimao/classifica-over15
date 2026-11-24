@@ -70,7 +70,13 @@ API_CAMPIONATI = {
     "Bulgaria": ["First League", "Second League"], "Ukraine": ["Premier League", "Persha Liga"],
     "Cyprus": ["1. Division", "2. Division"],     "Israel": ["Ligat ha'Al", "Liga Leumit"],
     "Iceland": ["Urvalsdeild", "1. Deild"],       "Bosnia": ["Premijer Liga"],
+    # Coppe europee (API-Football le elenca sotto "World"). Il modello usa i risultati di quella stessa
+    # competizione nella stagione in corso. Metti un # davanti a una riga per escluderla.
+    "World": ["UEFA Champions League", "UEFA Europa League",
+              "UEFA Europa Conference League", "UEFA Conference League"],
 }
+NOMI_COPPE_EUROPEE = {"uefa champions league": "Champions League", "uefa europa league": "Europa League",
+                      "uefa europa conference league": "Conference League", "uefa conference league": "Conference League"}
 # Se football-data oggi non ha le partite di un suo campionato (calendario non ancora aggiornato),
 # il bot le prende da API-Football usando questa corrispondenza.
 FD_SU_API = {
@@ -358,7 +364,8 @@ def scarica_api_football(date_ok, fd_senza_partite, s_media):
     print(f"  API-Football: {sum(len(v) for v in leghe.values())} partite in {len(leghe)} campionati da completare")
     righe = []
     for (lega_id, stagione_api, paese, nome), prossime in leghe.items():
-        etichetta = f"{PAESI_IT.get(paese, paese)} – {nome}"
+        coppa_eu = NOMI_COPPE_EUROPEE.get(norm(nome))
+        etichetta = f"Europa – {coppa_eu}" if coppa_eu else f"{PAESI_IT.get(paese, paese)} – {nome}"
         try:
             mod = modello_da_classifica(api, lega_id, stagione_api)
         except Exception as e:
@@ -370,7 +377,10 @@ def scarica_api_football(date_ok, fd_senza_partite, s_media):
             print(f"  ! {etichetta}: troppo poche partite giocate"); continue
         mod["s"] = s_media                     # stimata: la riga sarà segnalata
         print(f"  {etichetta} (API-Football): {len(prossime)} in programma")
-        righe += [analizza(m, mod, etichetta) for m in prossime]
+        nuove = [analizza(m, mod, etichetta) for m in prossime]
+        for r in nuove:
+            r["coppa_europea"] = bool(coppa_eu)
+        righe += nuove
     if esclusi:
         print("  Altri campionati europei oggi, non inclusi (aggiungili in API_CAMPIONATI se ti interessano):")
         for e in sorted(esclusi):
@@ -487,6 +497,8 @@ def nota(r):
         n.append(f"1° tempo stimato ({r['quota_ht']:.0%})")
     if not r["affidabile"]:
         n.append("pochi dati")
+    if r.get("coppa_europea"):
+        n.append("coppa europea")
     return " · ".join(n)
 
 
@@ -530,7 +542,9 @@ tr.poco{{color:#888}} td.nota{{font-size:12px;text-align:left;color:#B45F06}} .w
 P scenario completo (1 = la migliore del giorno), con le prime {TOP_TELEGRAM} evidenziate.
 Righe grigie con ⚠ = stima meno attendibile: <b>pochi dati</b> (squadre con poche partite giocate) oppure
 <b>1° tempo stimato</b> (la fonte non ha i risultati del primo tempo per quel campionato: la quota di gol nel 1° tempo
-è la media reale degli altri campionati del giorno, indicata tra parentesi, e la P 0-0 al {MINUTO_0_0}' è meno precisa).</p>
+è la media reale degli altri campionati del giorno, indicata tra parentesi, e la P 0-0 al {MINUTO_0_0}' è meno precisa).
+<b>Coppa europea</b> = stima basata solo sulle partite giocate in quella coppa in stagione (poche): nelle gare di
+ritorno ad eliminazione diretta il risultato dell'andata può cambiare molto il modo in cui si gioca.</p>
 <div class="wrap"><table><tr><th>Ora</th><th>Classifica</th><th>Campionato</th><th>Partita</th><th>Gol attesi</th>
 <th>P 0-0 al {MINUTO_0_0}'</th><th>P Over 1,5 se 0-0</th><th>P scenario completo</th><th>Attendibilità</th></tr>{corpo}</table></div>
 <p>Modello statistico semplice: non considera formazioni, infortuni, meteo o motivazioni. Usalo come filtro, non come certezza.</p></html>"""
